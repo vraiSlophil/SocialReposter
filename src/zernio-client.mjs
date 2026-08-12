@@ -1,0 +1,399 @@
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+
+export const DEFAULT_BASE_URL = "https://zernio.com/api/v1";
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+
+export class ZernioApiError extends Error {
+  constructor({ status, method, endpoint, payload, apiKey, sensitiveUrls = [] }) {
+    const safePayload = sanitizeForOutput(payload, { apiKey, sensitiveUrls });
+    const detail = getErrorMessage(safePayload);
+    super(`Zernio API error (${status})${detail ? `: ${detail}` : ""}`);
+    this.name = "ZernioApiError";
+    this.status = status;
+    this.method = method;
+    this.endpoint = endpoint;
+    this.details = safePayload;
+  }
+
+  toJSON() {
+    return {
+      name: this.name,
+      status: this.status,
+      method: this.method,
+      endpoint: this.endpoint,
+      details: this.details,
+    };
+  }
+}
+
+export class ZernioNetworkError extends Error {
+  constructor(operation) {
+    super(`Zernio ${operation} failed: no response was received.`);
+    this.name = "ZernioNetworkError";
+  }
+}
+
+export function sanitizeForOutput(value, { apiKey = "", sensitiveUrls = [] } = {}) {
+  return sanitizeValue(value, { apiKey, sensitiveUrls }, new WeakSet());
+}
+
+function sanitizeValue(value, context, seen) {
+  if (typeof value === "string") {
+    return redactString(value, context);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeValue(item, context, seen));
+  }
+
+  if (value && typeof value === "object") {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+    seen.add(value);
+
+    const output = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (isSensitiveKey(key)) {
+        output[key] = "[REDACTED]";
+      } else {
+        output[key] = sanitizeValue(item, context, seen);
+      }
+    }
+    return output;
+  }
+
+  return value;
+}
+
+function isSensitiveKey(key) {
+  return /^(authorization|api[-_]?key|token|uploadurl|signeduploadurl|presignedurl)$/i.test(key);
+}
+
+function redactString(value, { apiKey, sensitiveUrls }) {
+  let output = value;
+  if (apiKey) {
+    output = output.split(apiKey).join("[REDACTED]");
+  }
+
+  for (const sensitiveUrl of sensitiveUrls) {
+    if (sensitiveUrl) {
+      output = output.split(sensitiveUrl).join("[REDACTED_PRESIGNED_URL]");
+    }
+  }
+
+  return output.replace(/https?:\/\/[^\s"'<>]+/gi, (candidate) => {
+    if (isPresignedUrl(candidate)) {
+      return "[REDACTED_PRESIGNED_URL]";
+    }
+    return candidate;
+  });
+}
+
+function isPresignedUrl(candidate) {
+  try {
+    const url = new URL(candidate.replace(/[),.;]+$/, ""));
+    const signedQueryKeys = new Set([
+      "x-amz-signature",
+      "x-amz-credential",
+      "x-amz-algorithm",
+      "x-amz-date",
+      "x-amz-expires",
+      "signature",
+      "sig",
+    ]);
+    return [...url.searchParams.keys()].some((key) => signedQueryKeys.has(key.toLowerCase()));
+  } catch {
+    return false;
+  }
+}
+
+function getErrorMessage(payload) {
+  if (!payload || typeof payload !== "object") {
+    return typeof payload === "string" ? payload : "";
+  }
+
+  if (typeof payload.error === "string") {
+    return payload.error;
+  }
+  if (typeof payload.message === "string") {
+    return payload.message;
+  }
+  return "";
+}
+
+export function assertPublicMediaUrl(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error("A public media URL is required.");
+  }
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Media URL must be a valid http(s) URL.");
+  }
+
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) {
+    throw new Error("Media URL must be a public http(s) URL without embedded credentials.");
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  if (["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(hostname) || hostname.endsWith(".local")) {
+    throw new Error("Media URL must be publicly reachable, not a local address.");
+  }
+
+  return value;
+}
+
+export function buildPublicationBody({
+  mediaUrl,
+  caption = "",
+  instagramAccountId,
+  youtubeAccountId,
+  youtubeTitle,
+  youtubeVisibility = "private",
+  youtubeMadeForKids = false,
+  publishNow = false,
+}) {
+  const instagram = {
+    platform: "instagram",
+    platformSpecificData: {
+      shareToFeed: true,
+    },
+  };
+  const youtube = {
+    platform: "youtube",
+    platformSpecificData: {
+      title: youtubeTitle,
+      visibility: youtubeVisibility,
+      madeForKids: youtubeMadeForKids,
+    },
+  };
+
+  if (instagramAccountId) {
+    instagram.accountId = instagramAccountId;
+  }
+  if (youtubeAccountId) {
+    youtube.accountId = youtubeAccountId;
+  }
+
+  const body = {
+    mediaItems: [{ type: "video", url: mediaUrl }],
+    platforms: [instagram, youtube],
+  };
+
+  if (caption.trim() !== "") {
+    body.content = caption;
+  }
+  if (publishNow) {
+    body.publishNow = true;
+  }
+
+  return body;
+}
+
+export function extractAccounts(payload) {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  if (Array.isArray(payload?.accounts)) {
+    return payload.accounts;
+  }
+  if (Array.isArray(payload?.data?.accounts)) {
+    return payload.data.accounts;
+  }
+  return [];
+}
+
+export function isConnectedAccount(account) {
+  return account?.status !== "disconnected" && account?.isActive !== false;
+}
+
+export class ZernioClient {
+  #apiKey;
+  #baseUrl;
+  #fetch;
+  #requestIdFactory;
+
+  constructor({ apiKey, baseUrl = DEFAULT_BASE_URL, fetchImpl = globalThis.fetch, requestIdFactory = randomUUID } = {}) {
+    if (typeof apiKey !== "string" || apiKey.trim() === "") {
+      throw new Error("ZENRIO_API_KEY is required.");
+    }
+    if (typeof fetchImpl !== "function") {
+      throw new Error("A fetch implementation is required.");
+    }
+
+    this.#apiKey = apiKey;
+    this.#baseUrl = baseUrl.replace(/\/$/, "");
+    this.#fetch = fetchImpl;
+    this.#requestIdFactory = requestIdFactory;
+  }
+
+  async listAccounts() {
+    return this.#request("accounts", { method: "GET" });
+  }
+
+  async presignMedia({ filename, contentType, size }) {
+    return this.#request("media/presign", {
+      method: "POST",
+      json: { filename, contentType, size },
+    });
+  }
+
+  async uploadFile(filePath) {
+    let fileInfo;
+    try {
+      fileInfo = await stat(filePath);
+    } catch {
+      throw new Error(`Local media file was not found: ${filePath}`);
+    }
+    if (!fileInfo.isFile()) {
+      throw new Error(`Local media path is not a file: ${filePath}`);
+    }
+    if (fileInfo.size > MAX_UPLOAD_BYTES) {
+      throw new Error("Local media file exceeds Zernio's 5 GB presign limit.");
+    }
+
+    const presigned = await this.presignMedia({
+      filename: filePath.split(/[\\/]/).pop(),
+      contentType: "video/mp4",
+      size: fileInfo.size,
+    });
+    const uploadUrl = presigned?.uploadUrl;
+    const publicUrl = presigned?.publicUrl;
+    if (typeof uploadUrl !== "string" || uploadUrl === "") {
+      throw new Error("Zernio presign response did not include an upload URL.");
+    }
+    if (typeof publicUrl !== "string" || publicUrl === "") {
+      throw new Error("Zernio presign response did not include a public URL.");
+    }
+
+    const stream = createReadStream(filePath);
+    try {
+      await this.#request(uploadUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "video/mp4",
+          "Content-Length": String(fileInfo.size),
+        },
+        body: stream,
+        authenticated: false,
+        sensitiveUrls: [uploadUrl],
+        operation: "media upload",
+      });
+    } finally {
+      stream.destroy();
+    }
+
+    return publicUrl;
+  }
+
+  async validateMedia(mediaUrl) {
+    return this.#request("tools/validate/media", {
+      method: "POST",
+      json: { url: assertPublicMediaUrl(mediaUrl) },
+    });
+  }
+
+  async validatePost(body) {
+    return this.#request("tools/validate/post", {
+      method: "POST",
+      json: body,
+    });
+  }
+
+  async createPost(body) {
+    const requestId = this.#requestIdFactory();
+    return this.#request("posts", {
+      method: "POST",
+      json: body,
+      headers: { "x-request-id": requestId },
+    });
+  }
+
+  async getPost(postId) {
+    const safePostId = String(postId).trim();
+    if (safePostId === "") {
+      throw new Error("A post ID is required.");
+    }
+    return this.#request(`posts/${encodeURIComponent(safePostId)}`, { method: "GET" });
+  }
+
+  async #request(endpointOrUrl, {
+    method = "GET",
+    headers = {},
+    json,
+    body,
+    authenticated = true,
+    sensitiveUrls = [],
+    operation = "request",
+  } = {}) {
+    const url = authenticated ? `${this.#baseUrl}/${endpointOrUrl}` : endpointOrUrl;
+    const requestHeaders = { ...headers };
+    const init = { method, headers: requestHeaders };
+
+    if (authenticated) {
+      requestHeaders.Authorization = `Bearer ${this.#apiKey}`;
+    }
+    if (json !== undefined) {
+      requestHeaders["Content-Type"] = "application/json";
+      init.body = JSON.stringify(json);
+    } else if (body !== undefined) {
+      init.body = body;
+      if (typeof body?.pipe === "function") {
+        init.duplex = "half";
+      }
+    }
+
+    let response;
+    try {
+      response = await this.#fetch(url, init);
+    } catch {
+      throw new ZernioNetworkError(authenticated ? `${method} ${endpointOrUrl}` : operation);
+    }
+
+    const payload = await readResponsePayload(response);
+    const ok = typeof response.ok === "boolean" ? response.ok : response.status >= 200 && response.status < 300;
+    if (!ok) {
+      throw new ZernioApiError({
+        status: response.status,
+        method,
+        endpoint: authenticated ? endpointOrUrl : "media upload",
+        payload,
+        apiKey: this.#apiKey,
+        sensitiveUrls,
+      });
+    }
+
+    return payload;
+  }
+}
+
+export function createZernioClient(options) {
+  return new ZernioClient(options);
+}
+
+async function readResponsePayload(response) {
+  if (typeof response.text === "function") {
+    const text = await response.text();
+    if (text === "") {
+      return undefined;
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+  if (typeof response.json === "function") {
+    try {
+      return await response.json();
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
