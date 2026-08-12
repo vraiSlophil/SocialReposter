@@ -5,8 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   ZernioApiError,
+  assertPublicMediaUrl,
   buildPublicationBody,
   createZernioClient,
+  sanitizeForOutput,
 } from "../src/zernio-client.mjs";
 
 function response(status, body) {
@@ -43,6 +45,78 @@ test("auth is sent to API requests and secrets are absent from structured errors
     assert.doesNotMatch(JSON.stringify(error), /X-Amz-Signature=secret/);
     return true;
   });
+});
+
+test("unauthenticated request errors use the operation label as their endpoint", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zernio-error-"));
+  const filePath = join(directory, "sample.mp4");
+  await writeFile(filePath, Buffer.from("synthetic test bytes"));
+
+  try {
+    const client = createZernioClient({
+      apiKey: "operation-test-key",
+      fetchImpl: async (url) => {
+        if (url.endsWith("/media/presign")) {
+          return response(200, {
+            uploadUrl: "https://storage.example/upload",
+            publicUrl: "https://media.zernio.com/temp/sample.mp4",
+          });
+        }
+        return response(403, { error: "upload rejected" });
+      },
+    });
+
+    await assert.rejects(client.uploadFile(filePath), (error) => {
+      assert.ok(error instanceof ZernioApiError);
+      assert.equal(error.endpoint, "media upload");
+      return true;
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("sanitizeForOutput handles circular arrays", () => {
+  const circular = [];
+  circular.push(circular);
+
+  assert.deepEqual(sanitizeForOutput(circular), ["[Circular]"]);
+});
+
+test("assertPublicMediaUrl rejects literal non-public IP addresses", () => {
+  const nonPublicUrls = [
+    "http://0.0.0.0/video.mp4",
+    "http://10.0.0.1/video.mp4",
+    "http://172.16.0.1/video.mp4",
+    "http://192.168.1.1/video.mp4",
+    "http://127.0.0.1/video.mp4",
+    "http://169.254.1.1/video.mp4",
+    "http://224.0.0.1/video.mp4",
+    "http://240.0.0.1/video.mp4",
+    "https://[::]/video.mp4",
+    "https://[::1]/video.mp4",
+    "https://[fc00::1]/video.mp4",
+    "https://[fe80::1]/video.mp4",
+    "https://[ff02::1]/video.mp4",
+    "https://[2001:db8::1]/video.mp4",
+    "https://[::ffff:127.0.0.1]/video.mp4",
+  ];
+
+  for (const url of nonPublicUrls) {
+    assert.throws(() => assertPublicMediaUrl(url), /publicly reachable/);
+  }
+});
+
+test("assertPublicMediaUrl accepts public hostnames and IP addresses", () => {
+  const publicUrls = [
+    "https://cdn.example.com/video.mp4",
+    "http://8.8.8.8/video.mp4",
+    "https://[2001:4860:4860::8888]/video.mp4",
+  ];
+
+  for (const url of publicUrls) {
+    assert.equal(assertPublicMediaUrl(url), url);
+  }
 });
 
 test("upload presigns with video metadata, PUTs bytes without auth, and returns only publicUrl", async () => {

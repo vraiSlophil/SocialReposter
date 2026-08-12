@@ -1,9 +1,41 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { BlockList, isIP } from "node:net";
 
 export const DEFAULT_BASE_URL = "https://zernio.com/api/v1";
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+const NON_PUBLIC_IPV4_BLOCK_LIST = new BlockList();
+const NON_PUBLIC_IPV6_BLOCK_LIST = new BlockList();
+
+for (const [address, prefix, type] of [
+  ["0.0.0.0", 8, "ipv4"], // Unspecified and this-network addresses.
+  ["10.0.0.0", 8, "ipv4"], // Private-use addresses.
+  ["100.64.0.0", 10, "ipv4"], // Shared address space.
+  ["127.0.0.0", 8, "ipv4"], // Loopback addresses.
+  ["169.254.0.0", 16, "ipv4"], // Link-local addresses.
+  ["172.16.0.0", 12, "ipv4"], // Private-use addresses.
+  ["192.0.0.0", 24, "ipv4"], // IETF protocol assignments.
+  ["192.0.2.0", 24, "ipv4"], // Documentation addresses.
+  ["192.168.0.0", 16, "ipv4"], // Private-use addresses.
+  ["198.18.0.0", 15, "ipv4"], // Benchmarking addresses.
+  ["198.51.100.0", 24, "ipv4"], // Documentation addresses.
+  ["203.0.113.0", 24, "ipv4"], // Documentation addresses.
+  ["224.0.0.0", 4, "ipv4"], // Multicast addresses.
+  ["240.0.0.0", 4, "ipv4"], // Reserved and broadcast addresses.
+  ["::", 96, "ipv6"], // Unspecified, loopback, and IPv4-compatible addresses.
+  ["::ffff:0:0", 96, "ipv6"], // IPv4-mapped addresses.
+  ["100::", 64, "ipv6"], // Discard-only addresses.
+  ["2001:2::", 48, "ipv6"], // Benchmarking addresses.
+  ["2001:db8::", 32, "ipv6"], // Documentation addresses.
+  ["fc00::", 7, "ipv6"], // Unique-local addresses.
+  ["fe80::", 10, "ipv6"], // Link-local addresses.
+  ["fec0::", 10, "ipv6"], // Deprecated site-local addresses.
+  ["ff00::", 8, "ipv6"], // Multicast addresses.
+]) {
+  const blockList = type === "ipv4" ? NON_PUBLIC_IPV4_BLOCK_LIST : NON_PUBLIC_IPV6_BLOCK_LIST;
+  blockList.addSubnet(address, prefix, type);
+}
 
 export class ZernioApiError extends Error {
   constructor({ status, method, endpoint, payload, apiKey, sensitiveUrls = [] }) {
@@ -45,6 +77,10 @@ function sanitizeValue(value, context, seen) {
   }
 
   if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+    seen.add(value);
     return value.map((item) => sanitizeValue(item, context, seen));
   }
 
@@ -141,7 +177,14 @@ export function assertPublicMediaUrl(value) {
   }
 
   const hostname = url.hostname.toLowerCase();
-  if (["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(hostname) || hostname.endsWith(".local")) {
+  const ipAddress = hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+  const addressFamily = isIP(ipAddress);
+  const blockList = addressFamily === 4 ? NON_PUBLIC_IPV4_BLOCK_LIST : NON_PUBLIC_IPV6_BLOCK_LIST;
+  const isNonPublicIp = addressFamily > 0 && blockList.check(ipAddress, `ipv${addressFamily}`);
+
+  if (hostname === "localhost" || hostname.endsWith(".local") || isNonPublicIp) {
     throw new Error("Media URL must be publicly reachable, not a local address.");
   }
 
@@ -361,7 +404,7 @@ export class ZernioClient {
       throw new ZernioApiError({
         status: response.status,
         method,
-        endpoint: authenticated ? endpointOrUrl : "media upload",
+        endpoint: authenticated ? endpointOrUrl : operation,
         payload,
         apiKey: this.#apiKey,
         sensitiveUrls,
