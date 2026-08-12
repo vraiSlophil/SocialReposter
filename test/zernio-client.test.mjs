@@ -145,13 +145,40 @@ test("assertPublicMediaUrl accepts public hostnames and IP addresses", () => {
   }
 });
 
+test("assertPublicMediaUrl rejects raw controls and whitespace", () => {
+  const invalidUrls = [
+    "https://media.example/video.mp4\nINJECT",
+    "https://media.example/video.mp4\tINJECT",
+    " https://media.example/video.mp4",
+    "https://media.example/video.mp4 ",
+  ];
+
+  for (const url of invalidUrls) {
+    assert.throws(
+      () => assertPublicMediaUrl(url),
+      /raw control characters or whitespace/,
+    );
+  }
+});
+
+test("assertPublicMediaUrl preserves encoded characters and signature queries", () => {
+  const publicUrls = [
+    "https://media.example/video%20clip.mp4",
+    "https://media.example/video.mp4?sig=reusable-public-signature",
+  ];
+
+  for (const url of publicUrls) {
+    assert.equal(assertPublicMediaUrl(url), url);
+  }
+});
+
 test("upload presigns with video metadata, PUTs bytes without auth, and returns only publicUrl", async () => {
   const directory = await mkdtemp(join(tmpdir(), "zernio-poc-"));
   const filePath = join(directory, "sample.mp4");
   await writeFile(filePath, Buffer.from("synthetic test bytes"));
   const calls = [];
   const signedUploadUrl = "https://storage.example/upload?X-Amz-Signature=do-not-leak";
-  const publicUrl = "https://media.zernio.com/temp/sample.mp4";
+  const publicUrl = "https://media.zernio.com/temp/sample.mp4?sig=reusable-public-signature";
 
   try {
     const client = createZernioClient({
@@ -179,6 +206,48 @@ test("upload presigns with video metadata, PUTs bytes without auth, and returns 
       size: 20,
     });
     assert.doesNotMatch(result, /X-Amz-Signature/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("upload rejects invalid public URLs before uploading", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zernio-upload-invalid-public-url-"));
+  const filePath = join(directory, "sample.mp4");
+  const apiKey = "upload-invalid-public-url-key";
+  const uploadUrl = "https://storage.example/upload";
+  let publicUrl;
+  let uploadCalls = 0;
+
+  const client = createZernioClient({
+    apiKey,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/media/presign")) {
+        return response(200, { uploadUrl, publicUrl });
+      }
+      uploadCalls += 1;
+      return response(200);
+    },
+  });
+
+  try {
+    await writeFile(filePath, Buffer.from("synthetic test bytes"));
+
+    for (const [name, invalidUrl, expectedError] of [
+      ["invalid scheme", "file:///tmp/video.mp4", /public http\(s\) URL/],
+      ["local address", "http://127.0.0.1/video.mp4", /publicly reachable/],
+      ["control whitespace", "https://media.example/video.mp4\nINJECT", /raw control characters or whitespace/],
+      ["API key reflection", `https://media.example/${apiKey}.mp4`, (error) => {
+        assert.equal(error.message, "Zernio presign response included an unsafe public URL.");
+        assert.doesNotMatch(error.message, new RegExp(apiKey));
+        return true;
+      }],
+    ]) {
+      publicUrl = invalidUrl;
+      await assert.rejects(client.uploadFile(filePath), expectedError, name);
+    }
+
+    assert.equal(uploadCalls, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

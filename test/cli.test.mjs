@@ -74,7 +74,7 @@ test("upload CLI output contains only the reusable public URL", async () => {
   await writeFile(filePath, "synthetic upload bytes");
   const stdout = outputBuffer();
   const signedUploadUrl = "https://storage.example/upload?X-Amz-Signature=do-not-print";
-  const publicUrl = "https://media.zernio.com/temp/sample.mp4";
+  const publicUrl = "https://media.zernio.com/temp/sample.mp4?sig=reusable-public-signature";
 
   try {
     await runCli(["upload", filePath], {
@@ -93,6 +93,36 @@ test("upload CLI output contains only the reusable public URL", async () => {
 
   assert.equal(stdout.value(), `${publicUrl}\n`);
   assert.doesNotMatch(stdout.value(), /uploadUrl|X-Amz-Signature/);
+});
+
+test("upload CLI rejects a local public URL without printing it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zernio-cli-invalid-public-url-"));
+  const filePath = join(directory, "sample.mp4");
+  await writeFile(filePath, "synthetic upload bytes");
+  const stdout = outputBuffer();
+
+  try {
+    await assert.rejects(
+      runCli(["upload", filePath], {
+        env,
+        stdout,
+        fetchImpl: async (url) => {
+          if (url.endsWith("/media/presign")) {
+            return response(200, {
+              uploadUrl: "https://storage.example/upload",
+              publicUrl: "http://localhost/video.mp4",
+            });
+          }
+          return response(200);
+        },
+      }),
+      /publicly reachable/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+
+  assert.equal(stdout.value(), "");
 });
 
 test("upload rejects a missing path before making any fetch calls", async () => {

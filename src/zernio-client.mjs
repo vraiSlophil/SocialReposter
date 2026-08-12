@@ -174,6 +174,9 @@ export function assertPublicMediaUrl(value) {
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error("A public media URL is required.");
   }
+  if (/[\u0000-\u001F\u007F\s]/u.test(value)) {
+    throw new Error("Media URL must not contain raw control characters or whitespace.");
+  }
 
   let url;
   try {
@@ -323,6 +326,10 @@ export class ZernioClient {
     if (typeof publicUrl !== "string" || publicUrl === "") {
       throw new Error("Zernio presign response did not include a public URL.");
     }
+    if (publicUrl.includes(this.#apiKey)) {
+      throw new Error("Zernio presign response included an unsafe public URL.");
+    }
+    const validatedPublicUrl = assertPublicMediaUrl(publicUrl);
 
     const stream = createReadStream(filePath);
     try {
@@ -341,7 +348,7 @@ export class ZernioClient {
       stream.destroy();
     }
 
-    return publicUrl;
+    return validatedPublicUrl;
   }
 
   async validateMedia(mediaUrl) {

@@ -79,7 +79,7 @@ export async function runCli(argv, {
     case "accounts":
       return runAccounts(zernio, stdout, apiKey);
     case "upload":
-      return runUpload(zernio, parsed.file, stdout, apiKey);
+      return runUpload(zernio, parsed.file, stdout);
     case "validate":
       return runValidate(zernio, parsed.metadata, stdout, apiKey);
     case "publish":
@@ -258,9 +258,9 @@ async function runAccounts(client, stdout, apiKey) {
   writeJson(stdout, { accounts }, apiKey);
 }
 
-async function runUpload(client, filePath, stdout, apiKey) {
+async function runUpload(client, filePath, stdout) {
   const publicUrl = await client.uploadFile(filePath);
-  stdout.write(`${sanitizeForOutput(publicUrl, { apiKey })}\n`);
+  stdout.write(`${publicUrl}\n`);
 }
 
 async function runValidate(client, metadata, stdout, apiKey) {
