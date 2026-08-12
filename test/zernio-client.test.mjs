@@ -83,6 +83,32 @@ test("sanitizeForOutput handles circular arrays", () => {
   assert.deepEqual(sanitizeForOutput(circular), ["[Circular]"]);
 });
 
+test("sanitizeForOutput redacts upload URL key variants", () => {
+  const sanitized = sanitizeForOutput({
+    uploadUrl: "https://storage.example/upload?signature=camel-secret",
+    upload_url: "https://storage.example/upload?signature=underscore-secret",
+    "upload-url": "https://storage.example/upload?signature=dash-secret",
+    signedUploadUrl: "https://storage.example/upload?signature=signed-camel-secret",
+    signed_upload_url: "https://storage.example/upload?signature=signed-underscore-secret",
+    "signed-upload-url": "https://storage.example/upload?signature=signed-dash-secret",
+    presignedUploadUrl: "https://storage.example/upload?signature=presigned-camel-secret",
+    presigned_upload_url: "https://storage.example/upload?signature=presigned-underscore-secret",
+    "presigned-upload-url": "https://storage.example/upload?signature=presigned-dash-secret",
+  });
+
+  assert.deepEqual(sanitized, {
+    uploadUrl: "[REDACTED]",
+    upload_url: "[REDACTED]",
+    "upload-url": "[REDACTED]",
+    signedUploadUrl: "[REDACTED]",
+    signed_upload_url: "[REDACTED]",
+    "signed-upload-url": "[REDACTED]",
+    presignedUploadUrl: "[REDACTED]",
+    presigned_upload_url: "[REDACTED]",
+    "presigned-upload-url": "[REDACTED]",
+  });
+});
+
 test("assertPublicMediaUrl rejects literal non-public IP addresses", () => {
   const nonPublicUrls = [
     "http://0.0.0.0/video.mp4",

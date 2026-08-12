@@ -5,6 +5,15 @@ import { BlockList, isIP } from "node:net";
 
 export const DEFAULT_BASE_URL = "https://zernio.com/api/v1";
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+const SENSITIVE_KEY_NAMES = new Set([
+  "authorization",
+  "apikey",
+  "token",
+  "uploadurl",
+  "signeduploadurl",
+  "presignedurl",
+  "presigneduploadurl",
+]);
 const NON_PUBLIC_IPV4_BLOCK_LIST = new BlockList();
 const NON_PUBLIC_IPV6_BLOCK_LIST = new BlockList();
 
@@ -105,7 +114,8 @@ function sanitizeValue(value, context, seen) {
 }
 
 function isSensitiveKey(key) {
-  return /^(authorization|api[-_]?key|token|uploadurl|signeduploadurl|presignedurl)$/i.test(key);
+  const normalizedKey = key.toLowerCase().replace(/[-_]/g, "");
+  return SENSITIVE_KEY_NAMES.has(normalizedKey);
 }
 
 function redactString(value, { apiKey, sensitiveUrls }) {
