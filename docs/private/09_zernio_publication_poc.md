@@ -42,7 +42,7 @@ node src/cli.mjs publish \
 node src/cli.mjs status 'zernio-post-id'
 ```
 
-`validate` calls only Zernio’s media and content-validation tools. It is content-only: it does not publish, verify actual media duration, validate account permissions, or prove that a platform account can accept the upload. Instagram has no private visibility option; YouTube defaults to `private` in this POC. Publishing is the only command that calls `POST /v1/posts`, and it sends a fresh UUID `x-request-id` for that publication attempt.
+`validate` calls only Zernio’s media and content-validation tools. It is content-only: it does not publish, verify actual media duration, validate account permissions, or prove that a platform account can accept the upload. Instagram has no private visibility option; YouTube defaults to `private` in this POC. Publishing is the only command that calls `POST /api/v1/posts`, and it sends a fresh UUID `x-request-id` for that publication attempt.
 
 Do not paste API keys or signed upload URLs into tickets or logs. The CLI reports connected account metadata, redacts sensitive error fields, and never prints the presigned `uploadUrl`.
 

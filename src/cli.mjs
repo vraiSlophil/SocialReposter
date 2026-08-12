@@ -227,13 +227,20 @@ function parseMetadata(flags, publishing) {
     youtubeTitle: title,
     youtubeVisibility: visibility,
     youtubeMadeForKids: flags.get("made-for-kids") ?? false,
-    instagramAccountId: optionalTrimmed(flags.get("instagram-account-id")),
-    youtubeAccountId: optionalTrimmed(flags.get("youtube-account-id")),
+    instagramAccountId: optionalTrimmed(flags.get("instagram-account-id"), "--instagram-account-id"),
+    youtubeAccountId: optionalTrimmed(flags.get("youtube-account-id"), "--youtube-account-id"),
   };
 }
 
-function optionalTrimmed(value) {
-  return value === undefined ? undefined : value.trim();
+function optionalTrimmed(value, optionName) {
+  if (value === undefined) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    throw new CliInputError(`${optionName} requires a non-empty value.`);
+  }
+  return trimmed;
 }
 
 async function runAccounts(client, stdout, apiKey) {

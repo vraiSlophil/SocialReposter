@@ -144,6 +144,35 @@ test("publish cannot reach POST /posts without the exact confirmation", async ()
   assert.equal(calls, 0);
 });
 
+test("publish rejects whitespace-only explicit account IDs before fetching accounts", async (t) => {
+  for (const option of ["--instagram-account-id", "--youtube-account-id"]) {
+    await t.test(option, async () => {
+      let calls = 0;
+      await assert.rejects(
+        runCli([
+          "publish",
+          "--media-url",
+          "https://media.example/video.mp4",
+          "--youtube-title",
+          "Title",
+          option,
+          " \t ",
+          "--confirm",
+          "PUBLISH",
+        ], {
+          env,
+          fetchImpl: async () => {
+            calls += 1;
+            return response(200, {});
+          },
+        }),
+        new RegExp(`${option} requires a non-empty value\\.`),
+      );
+      assert.equal(calls, 0);
+    });
+  }
+});
+
 test("publish rejects zero and multiple connected account matches", async (t) => {
   for (const accounts of [
     [],
