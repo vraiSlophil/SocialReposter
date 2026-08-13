@@ -1,0 +1,14 @@
+{
+  "name": "zernio-publication-poc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dependency-free Zernio publication proof of concept",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "help": "node src/cli.mjs --help"
+  }
+}
