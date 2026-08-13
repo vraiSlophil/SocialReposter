@@ -5,6 +5,7 @@ import { BlockList, isIP } from "node:net";
 
 export const DEFAULT_BASE_URL = "https://zernio.com/api/v1";
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+const SUPPORTED_PLATFORMS = ["instagram", "youtube"];
 const SENSITIVE_KEY_NAMES = new Set([
   "authorization",
   "apikey",
@@ -206,6 +207,7 @@ export function assertPublicMediaUrl(value) {
 
 export function buildPublicationBody({
   mediaUrl,
+  targetPlatforms = SUPPORTED_PLATFORMS,
   caption = "",
   instagramAccountId,
   youtubeAccountId,
@@ -214,31 +216,38 @@ export function buildPublicationBody({
   youtubeMadeForKids = false,
   publishNow = false,
 }) {
-  const instagram = {
-    platform: "instagram",
-    platformSpecificData: {
-      shareToFeed: true,
-    },
-  };
-  const youtube = {
-    platform: "youtube",
-    platformSpecificData: {
-      title: youtubeTitle,
-      visibility: youtubeVisibility,
-      madeForKids: youtubeMadeForKids,
-    },
-  };
+  const selectedPlatforms = selectPublicationPlatforms(targetPlatforms);
+  const platforms = selectedPlatforms.map((selectedPlatform) => {
+    if (selectedPlatform === "instagram") {
+      const instagram = {
+        platform: "instagram",
+        platformSpecificData: {
+          shareToFeed: true,
+        },
+      };
+      if (instagramAccountId) {
+        instagram.accountId = instagramAccountId;
+      }
+      return instagram;
+    }
 
-  if (instagramAccountId) {
-    instagram.accountId = instagramAccountId;
-  }
-  if (youtubeAccountId) {
-    youtube.accountId = youtubeAccountId;
-  }
+    const youtube = {
+      platform: "youtube",
+      platformSpecificData: {
+        title: youtubeTitle,
+        visibility: youtubeVisibility,
+        madeForKids: youtubeMadeForKids,
+      },
+    };
+    if (youtubeAccountId) {
+      youtube.accountId = youtubeAccountId;
+    }
+    return youtube;
+  });
 
   const body = {
     mediaItems: [{ type: "video", url: mediaUrl }],
-    platforms: [instagram, youtube],
+    platforms,
   };
 
   if (caption.trim() !== "") {
@@ -249,6 +258,19 @@ export function buildPublicationBody({
   }
 
   return body;
+}
+
+function selectPublicationPlatforms(targetPlatforms) {
+  const selectedPlatforms = targetPlatforms;
+  if (!Array.isArray(selectedPlatforms) || selectedPlatforms.length === 0) {
+    throw new Error("At least one publication platform is required.");
+  }
+  if (new Set(selectedPlatforms).size !== selectedPlatforms.length || selectedPlatforms.some(
+    (selectedPlatform) => !SUPPORTED_PLATFORMS.includes(selectedPlatform),
+  )) {
+    throw new Error("Publication platforms must be Instagram or YouTube.");
+  }
+  return selectedPlatforms;
 }
 
 export function extractAccounts(payload) {

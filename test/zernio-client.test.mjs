@@ -253,7 +253,36 @@ test("upload rejects invalid public URLs before uploading", async () => {
   }
 });
 
-test("publication body has both platform settings and optional publishNow", () => {
+test("publication body selects requested targets and defaults to both", () => {
+  const instagramOnlyBody = buildPublicationBody({
+    mediaUrl: "https://media.example/video.mp4",
+    targetPlatforms: ["instagram"],
+  });
+  assert.deepEqual(instagramOnlyBody.platforms, [
+    {
+      platform: "instagram",
+      platformSpecificData: { shareToFeed: true },
+    },
+  ]);
+
+  const youtubeOnlyBody = buildPublicationBody({
+    mediaUrl: "https://media.example/video.mp4",
+    targetPlatforms: ["youtube"],
+    youtubeTitle: "A title",
+    youtubeAccountId: "yt-1",
+  });
+  assert.deepEqual(youtubeOnlyBody.platforms, [
+    {
+      platform: "youtube",
+      accountId: "yt-1",
+      platformSpecificData: {
+        title: "A title",
+        visibility: "private",
+        madeForKids: false,
+      },
+    },
+  ]);
+
   const validationBody = buildPublicationBody({
     mediaUrl: "https://media.example/video.mp4",
     caption: "A caption",

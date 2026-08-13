@@ -26,7 +26,7 @@ Staged workflow:
   1. accounts  Inspect connected Instagram and YouTube accounts.
   2. upload    Presign and upload a local MP4; print only its reusable public URL.
   3. validate  Validate media and post content only; never publishes.
-  4. publish   Resolve accounts and publish immediately after --confirm PUBLISH.
+  4. publish   Resolve selected connected accounts and publish after --confirm PUBLISH.
   5. status    Inspect overall and per-platform publication status.
 
 Authentication:
@@ -36,24 +36,33 @@ Authentication:
 Usage:
   node src/cli.mjs accounts
   node src/cli.mjs upload <local-video.mp4>
-  node src/cli.mjs validate --media-url <public-url> --youtube-title <title> [options]
-  node src/cli.mjs publish --media-url <public-url> --youtube-title <title> --confirm PUBLISH [options]
+  node src/cli.mjs validate --media-url <public-url> [options]
+  node src/cli.mjs publish --media-url <public-url> --confirm PUBLISH [options]
   node src/cli.mjs status <post-id>
 
 Content options for validate/publish:
+  --platform <instagram|youtube>        Optional single-platform target
   --caption <text>                       Optional shared Instagram caption/YouTube description
-  --youtube-title <text>                 Required, non-empty YouTube title (alias: --title)
+  --youtube-title <text>                 Required when YouTube is selected (alias: --title)
   --youtube-visibility <value>           private (default), public, or unlisted
   --made-for-kids                        Set YouTube madeForKids to true (default: false)
   --instagram-account-id <id>            Optional explicit Instagram account ID
   --youtube-account-id <id>              Optional explicit YouTube account ID
   --confirm PUBLISH                      Required by publish, exact literal confirmation
 
+Targeting:
+  With --platform, only that platform is included. Without it, publish discovers connected
+  supported platforms with one accounts request, skips zero-match platforms, and rejects
+  ambiguous or empty target selections.
+
 Examples:
   node src/cli.mjs accounts
   node src/cli.mjs upload ./video.mp4
   node src/cli.mjs validate --media-url https://cdn.example/video.mp4 --caption 'Hello' --youtube-title 'Demo'
+  node src/cli.mjs validate --platform instagram --media-url https://cdn.example/video.mp4 --caption 'Instagram only'
+  node src/cli.mjs validate --platform youtube --media-url https://cdn.example/video.mp4 --youtube-title 'YouTube only'
   node src/cli.mjs publish --media-url https://cdn.example/video.mp4 --youtube-title 'Demo' --confirm PUBLISH
+  node src/cli.mjs publish --platform instagram --media-url https://cdn.example/video.mp4 --confirm PUBLISH
   node src/cli.mjs status 65f1c0a9e2b5af0012ab34cd
 `;
 
@@ -135,6 +144,7 @@ function parseFlags(tokens) {
   const booleanNames = new Set(["made-for-kids"]);
   const valueNames = new Set([
     "media-url",
+    "platform",
     "caption",
     "title",
     "youtube-title",
@@ -204,12 +214,32 @@ function parseMetadata(flags, publishing) {
     throw new CliInputError(error.message);
   }
 
+  const platform = flags.has("platform")
+    ? optionalTrimmed(flags.get("platform"), "--platform")
+    : undefined;
+  if (platform !== undefined && !PLATFORMS.includes(platform)) {
+    throw new CliInputError("--platform must be instagram or youtube.");
+  }
+
+  const instagramAccountId = optionalTrimmed(flags.get("instagram-account-id"), "--instagram-account-id");
+  const youtubeAccountId = optionalTrimmed(flags.get("youtube-account-id"), "--youtube-account-id");
+  if (platform === "instagram" && youtubeAccountId !== undefined) {
+    throw new CliInputError("--youtube-account-id contradicts --platform instagram.");
+  }
+  if (platform === "youtube" && instagramAccountId !== undefined) {
+    throw new CliInputError("--instagram-account-id contradicts --platform youtube.");
+  }
+
   const title = flags.get("youtube-title") ?? flags.get("title");
-  if (title === undefined || title.trim() === "") {
+  if (title !== undefined && title.trim() === "") {
     throw new CliInputError("A non-empty --youtube-title (or --title) is required.");
   }
   if (flags.has("youtube-title") && flags.has("title") && flags.get("youtube-title") !== flags.get("title")) {
     throw new CliInputError("--youtube-title and --title must match when both are provided.");
+  }
+  const titleRequired = platform === "youtube" || (!publishing && platform === undefined);
+  if (titleRequired && title === undefined) {
+    throw new CliInputError("A non-empty --youtube-title (or --title) is required.");
   }
 
   const visibility = flags.get("youtube-visibility") ?? "private";
@@ -223,12 +253,13 @@ function parseMetadata(flags, publishing) {
 
   return {
     mediaUrl,
+    platform,
     caption: flags.get("caption") ?? "",
     youtubeTitle: title,
     youtubeVisibility: visibility,
     youtubeMadeForKids: flags.get("made-for-kids") ?? false,
-    instagramAccountId: optionalTrimmed(flags.get("instagram-account-id"), "--instagram-account-id"),
-    youtubeAccountId: optionalTrimmed(flags.get("youtube-account-id"), "--youtube-account-id"),
+    instagramAccountId,
+    youtubeAccountId,
   };
 }
 
@@ -264,15 +295,19 @@ async function runUpload(client, filePath, stdout) {
 }
 
 async function runValidate(client, metadata, stdout, apiKey) {
-  const body = buildPublicationBody({ ...metadata, publishNow: false });
+  const targetPlatforms = metadata.platform ? [metadata.platform] : undefined;
+  const body = buildPublicationBody({ ...metadata, targetPlatforms, publishNow: false });
   const media = await client.validateMedia(metadata.mediaUrl);
   const post = await client.validatePost(body);
   writeJson(stdout, { media, post }, apiKey);
 }
 
 async function runPublish(client, metadata, stdout, apiKey) {
-  const accountIds = await resolveAccountIds(client, metadata);
-  const body = buildPublicationBody({ ...metadata, ...accountIds, publishNow: true });
+  const publicationTargets = await resolvePublicationTargets(client, metadata);
+  if (publicationTargets.targetPlatforms.includes("youtube") && isBlank(metadata.youtubeTitle)) {
+    throw new CliInputError("A non-empty --youtube-title (or --title) is required when YouTube is selected.");
+  }
+  const body = buildPublicationBody({ ...metadata, ...publicationTargets, publishNow: true });
   const result = await client.createPost(body);
   writeJson(stdout, result, apiKey);
 }
@@ -282,27 +317,30 @@ async function runStatus(client, postId, stdout, apiKey) {
   stdout.write(`${renderStatus(result, postId, apiKey)}\n`);
 }
 
-export async function resolveAccountIds(client, metadata) {
+export async function resolvePublicationTargets(client, metadata) {
+  const targetPlatforms = metadata.platform ? [metadata.platform] : PLATFORMS;
   const resolved = {
     instagramAccountId: metadata.instagramAccountId,
     youtubeAccountId: metadata.youtubeAccountId,
+    targetPlatforms: [],
   };
-  const missingPlatforms = PLATFORMS.filter((platform) => {
+  const missingPlatforms = targetPlatforms.filter((platform) => {
     return platform === "instagram" ? !resolved.instagramAccountId : !resolved.youtubeAccountId;
   });
 
-  if (missingPlatforms.length === 0) {
-    return resolved;
-  }
-
-  const accounts = extractAccounts(await client.listAccounts());
+  const accounts = missingPlatforms.length === 0
+    ? []
+    : extractAccounts(await client.listAccounts());
   for (const platform of missingPlatforms) {
     const matches = accounts.filter((account) => account?.platform === platform && isConnectedAccount(account));
-    if (matches.length !== 1) {
+    if (matches.length > 1) {
       throw new CliInputError(
-        `Cannot publish to ${platform}: expected exactly one connected account, found ${matches.length}. ` +
+        `Cannot publish to ${platform}: expected at most one connected account, found ${matches.length}. ` +
         `Pass --${platform}-account-id explicitly or fix the connected accounts.`,
       );
+    }
+    if (matches.length === 0) {
+      continue;
     }
     const accountId = matches[0]._id ?? matches[0].id;
     if (typeof accountId !== "string" || accountId.trim() === "") {
@@ -315,7 +353,18 @@ export async function resolveAccountIds(client, metadata) {
     }
   }
 
+  resolved.targetPlatforms = targetPlatforms.filter((platform) => {
+    return platform === "instagram" ? Boolean(resolved.instagramAccountId) : Boolean(resolved.youtubeAccountId);
+  });
+  if (resolved.targetPlatforms.length === 0) {
+    throw new CliInputError("Cannot publish: no connected Instagram or YouTube account is available.");
+  }
+
   return resolved;
+}
+
+function isBlank(value) {
+  return typeof value !== "string" || value.trim() === "";
 }
 
 export function renderStatus(result, requestedPostId = "unknown", apiKey = "") {

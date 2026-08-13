@@ -22,6 +22,18 @@ node src/cli.mjs validate \
   --caption 'Caption shared to Instagram and YouTube description' \
   --youtube-title 'POC video'
 
+# Validate one platform without supplying YouTube metadata.
+node src/cli.mjs validate \
+  --platform instagram \
+  --media-url 'https://media.example/video.mp4' \
+  --caption 'Instagram-only caption'
+
+# A YouTube target always requires a non-empty title.
+node src/cli.mjs validate \
+  --platform youtube \
+  --media-url 'https://media.example/video.mp4' \
+  --youtube-title 'YouTube-only title'
+
 # Optional explicit account IDs and YouTube settings:
 node src/cli.mjs validate \
   --media-url 'https://media.example/video.mp4' \
@@ -38,11 +50,27 @@ node src/cli.mjs publish \
   --youtube-title 'POC video' \
   --confirm PUBLISH
 
+# Publish to one connected Instagram account without supplying its account ID.
+node src/cli.mjs publish \
+  --platform instagram \
+  --media-url 'https://media.example/video.mp4' \
+  --caption 'Instagram-only caption' \
+  --confirm PUBLISH
+
+# Publish to one connected YouTube account without supplying its account ID.
+node src/cli.mjs publish \
+  --platform youtube \
+  --media-url 'https://media.example/video.mp4' \
+  --youtube-title 'YouTube-only title' \
+  --confirm PUBLISH
+
 # 5. Poll a returned Zernio post ID.
 node src/cli.mjs status 'zernio-post-id'
 ```
 
-`validate` calls only Zernio’s media and content-validation tools. It is content-only: it does not publish, verify actual media duration, validate account permissions, or prove that a platform account can accept the upload. Instagram has no private visibility option; YouTube defaults to `private` in this POC. Publishing is the only command that calls `POST /api/v1/posts`, and it sends a fresh UUID `x-request-id` for that publication attempt.
+`validate` calls only Zernio’s media and content-validation tools. It is content-only: it does not publish, verify actual media duration, validate account permissions, or prove that a platform account can accept the upload. Instagram publication is public; Instagram has no private visibility option. YouTube defaults to `private` in this POC. Publishing is the only command that calls `POST /api/v1/posts`, and it sends a fresh UUID `x-request-id` for that publication attempt.
+
+Use `--platform instagram` or `--platform youtube` to select exactly one publication target. A YouTube target requires `--youtube-title` (or `--title`); an Instagram-only target does not. When `publish` has no `--platform`, it makes one `/accounts` request, discovers each connected supported platform with one unambiguous account, skips platforms with no match, and rejects ambiguous or empty selections. It then requires a YouTube title only when YouTube is among the resolved targets. Explicit account IDs are used directly, but an account ID for the other platform is rejected when `--platform` selects one platform.
 
 Do not paste API keys or signed upload URLs into tickets or logs. The CLI reports connected account metadata, redacts sensitive error fields, and never prints the presigned `uploadUrl`.
 
